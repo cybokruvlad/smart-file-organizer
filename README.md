@@ -15,6 +15,11 @@ Built with Python, with a focus on safe file operations, clear reporting, and au
 - **Error handling** — report file-operation failures and preserve the source when a move cannot be completed safely.
 - **Automated quality checks** — pytest, coverage reporting, Ruff, and GitHub Actions CI.
 
+## Demo
+
+The organizer previews file moves without modifying the source directory.
+
+![Smart File Organizer dry-run preview](docs/screenshots/dry-run.png)
 ## Requirements
 
 - Python 3.10 or newer
@@ -180,4 +185,4 @@ smart-file-organizer/
 
 ## License
 
-This project declares the MIT License in `pyproject.toml`.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
