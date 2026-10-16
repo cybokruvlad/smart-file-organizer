@@ -1,0 +1,158 @@
+from pathlib import Path
+
+import pytest
+
+from src.organizer import (
+    category_for,
+    execute_organization,
+    find_duplicates,
+    main,
+    plan_organization,
+    save_report,
+)
+
+
+def test_category_is_case_insensitive():
+    assert category_for(Path("PHOTO.JPG")) == "Images"
+    assert category_for(Path("report.PDF")) == "Documents"
+    assert category_for(Path("unknown.xyz")) == "Other"
+
+
+def test_plan_does_not_move_files(tmp_path):
+    (tmp_path / "photo.jpg").write_bytes(b"image")
+    actions = plan_organization(tmp_path)
+    assert len(actions) == 1
+    assert actions[0].status == "planned"
+    assert (tmp_path / "photo.jpg").exists()
+    assert not (tmp_path / "Images").exists()
+
+
+def test_execute_moves_file_to_category(tmp_path):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"image")
+    report = execute_organization(tmp_path, plan_organization(tmp_path))
+    assert not photo.exists()
+    assert (tmp_path / "Images" / "photo.jpg").read_bytes() == b"image"
+    assert len(report["moved"]) == 1
+    assert report["errors"] == []
+
+
+def test_existing_destination_is_never_overwritten(tmp_path):
+    (tmp_path / "photo.jpg").write_bytes(b"original")
+    target = tmp_path / "Images"
+    target.mkdir()
+    (target / "photo.jpg").write_bytes(b"existing")
+    report = execute_organization(tmp_path, plan_organization(tmp_path))
+    assert (target / "photo.jpg").read_bytes() == b"existing"
+    assert (tmp_path / "photo.jpg").read_bytes() == b"original"
+    assert report["skipped"]
+
+
+def test_missing_source_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        plan_organization(tmp_path / "missing")
+
+
+def test_file_source_raises(tmp_path):
+    file = tmp_path / "file.txt"
+    file.write_text("x", encoding="utf-8")
+    with pytest.raises(NotADirectoryError):
+        plan_organization(file)
+
+
+def test_duplicate_detection_uses_file_content(tmp_path):
+    (tmp_path / "one.txt").write_text("same content", encoding="utf-8")
+    (tmp_path / "two.txt").write_text("same content", encoding="utf-8")
+    (tmp_path / "different.txt").write_text("different", encoding="utf-8")
+    duplicates = find_duplicates(tmp_path)
+    assert len(duplicates) == 1
+    assert len(next(iter(duplicates.values()))) == 2
+
+
+def test_json_report_is_written(tmp_path):
+    output = tmp_path / "reports" / "report.json"
+    save_report({"moved": [], "errors": []}, output)
+    assert '"moved": []' in output.read_text(encoding="utf-8")
+
+
+def test_cli_defaults_to_dry_run(tmp_path, capsys):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"image")
+    result = main([str(tmp_path)])
+    assert result == 0
+    assert photo.exists()
+    assert "Dry run only" in capsys.readouterr().out
+
+
+def test_cli_execute_moves_files(tmp_path):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"image")
+    result = main([str(tmp_path), "--execute"])
+    assert result == 0
+    assert not photo.exists()
+    assert (tmp_path / "Images" / "photo.jpg").exists()
+
+
+def test_cli_report_and_duplicate_scan(tmp_path):
+    (tmp_path / "one.txt").write_text("same", encoding="utf-8")
+    (tmp_path / "two.txt").write_text("same", encoding="utf-8")
+    output = tmp_path.parent / "organizer-report-test.json"
+    try:
+        result = main([str(tmp_path), "--report", str(output), "--duplicates"])
+        assert result == 0
+        assert output.exists()
+        assert "duplicates" in output.read_text(encoding="utf-8")
+    finally:
+        output.unlink(missing_ok=True)
+
+
+def test_copy_failure_preserves_original_and_cleans_partial_destination(
+    tmp_path, monkeypatch
+):
+    import src.organizer as organizer
+
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"original")
+    actions = plan_organization(tmp_path)
+    real_copyfileobj = organizer.shutil.copyfileobj
+    calls = 0
+
+    def failing_copyfileobj(source, destination, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            destination.write(b"partial")
+            raise OSError("simulated copy failure")
+        return real_copyfileobj(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(organizer.shutil, "copyfileobj", failing_copyfileobj)
+
+    report = execute_organization(tmp_path, actions)
+
+    assert photo.read_bytes() == b"original"
+    assert not (tmp_path / "Images" / "photo.jpg").exists()
+    assert len(report["errors"]) == 1
+    assert not list((tmp_path / "Images").glob(".organizer-*"))
+
+
+def test_source_unlink_failure_keeps_source_and_reports_error(
+    tmp_path, monkeypatch
+):
+
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"original")
+    actions = plan_organization(tmp_path)
+    real_unlink = Path.unlink
+
+    def failing_unlink(path, *args, **kwargs):
+        if path == photo:
+            raise OSError("simulated unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    report = execute_organization(tmp_path, actions)
+
+    assert photo.read_bytes() == b"original"
+    assert (tmp_path / "Images" / "photo.jpg").read_bytes() == b"original"
+    assert len(report["errors"]) == 1
