@@ -156,3 +156,69 @@ def test_source_unlink_failure_keeps_source_and_reports_error(
     assert photo.read_bytes() == b"original"
     assert (tmp_path / "Images" / "photo.jpg").read_bytes() == b"original"
     assert len(report["errors"]) == 1
+
+
+def test_changed_source_is_skipped(tmp_path):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"original")
+    actions = plan_organization(tmp_path)
+
+    photo.unlink()
+
+    report = execute_organization(tmp_path, actions)
+
+    assert report["skipped"] == [
+        {"source": str(photo), "reason": "source_changed"}
+    ]
+    assert report["moved"] == []
+    assert report["errors"] == []
+
+
+def test_destination_outside_source_is_rejected(tmp_path):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"original")
+    action = plan_organization(tmp_path)[0]
+    outside = tmp_path.parent / "outside" / "photo.jpg"
+
+    from src.organizer import FileAction
+
+    malicious_action = FileAction(
+        source=action.source,
+        destination=str(outside),
+        category=action.category,
+        status="planned",
+    )
+
+    report = execute_organization(tmp_path, [malicious_action])
+
+    assert photo.read_bytes() == b"original"
+    assert not outside.exists()
+    assert report["skipped"] == [
+        {"source": str(photo), "reason": "invalid_destination"}
+    ]
+    assert report["errors"] == []
+
+
+def test_save_report_propagates_write_error(tmp_path, monkeypatch):
+    import src.organizer as organizer
+
+    output = tmp_path / "report.json"
+
+    def fail_write(*args, **kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(Path, "write_text", fail_write)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        organizer.save_report({"moved": []}, output)
+
+
+def test_cli_returns_error_for_missing_directory(tmp_path, capsys):
+    missing = tmp_path / "does-not-exist"
+
+    result = main([str(missing)])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert "Error:" in captured.out
+    assert "does not exist" in captured.out
