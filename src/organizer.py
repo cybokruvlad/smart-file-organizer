@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -66,9 +67,7 @@ def plan_organization(source: Path) -> list[FileAction]:
             status = "planned"
             destinations.add(destination)
 
-        actions.append(
-            FileAction(str(path), str(destination), category, status)
-        )
+        actions.append(FileAction(str(path), str(destination), category, status))
 
     return actions
 
@@ -112,8 +111,6 @@ def execute_organization(
 
             destination.parent.mkdir(parents=True, exist_ok=True)
 
-            import tempfile
-
             with tempfile.NamedTemporaryFile(
                 mode="wb",
                 dir=destination.parent,
@@ -138,30 +135,52 @@ def execute_organization(
                     {"source": action.source, "reason": "destination_exists"}
                 )
                 continue
-            except OSError:
+            except OSError as copy_error:
                 if destination_created:
                     try:
-                        destination.unlink(missing_ok=True)
-                    except OSError:
-                        pass
+                        destination.unlink()
+                    except OSError as cleanup_error:
+                        raise OSError(
+                            f"{copy_error}; additionally failed to remove "
+                            f"partial destination {destination}: {cleanup_error}"
+                        ) from copy_error
                 raise
 
-            original.unlink()
+            try:
+                original.unlink()
+            except OSError as exc:
+                report["errors"].append(
+                    {
+                        "source": str(original),
+                        "destination": str(destination),
+                        "error": str(exc),
+                        "state": "destination_created_source_retained",
+                    }
+                )
+                continue
+
             report["moved"].append(
-                {"source": action.source, "destination": str(destination)}
+                {"source": str(original), "destination": str(destination)}
             )
+
         except OSError as exc:
-            report["errors"].append(
-                {"source": action.source, "error": str(exc)}
-            )
+            report["errors"].append({"source": action.source, "error": str(exc)})
         finally:
             if temporary is not None:
                 try:
                     temporary.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    report["errors"].append(
+                        {
+                            "source": action.source,
+                            "temporary": str(temporary),
+                            "error": f"Failed to remove temporary file: {exc}",
+                        }
+                    )
 
     return report
+
+
 def find_duplicates(source: Path) -> dict[str, list[str]]:
     source = source.resolve()
     if not source.is_dir():
@@ -176,11 +195,7 @@ def find_duplicates(source: Path) -> dict[str, list[str]]:
         except OSError:
             continue
 
-    return {
-        digest: paths
-        for digest, paths in by_hash.items()
-        if len(paths) > 1
-    }
+    return {digest: paths for digest, paths in by_hash.items() if len(paths) > 1}
 
 
 def save_report(report: dict[str, object], output: Path) -> None:
@@ -217,9 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         actions = plan_organization(args.source)
         for action in actions:
-            print(
-                f"[{action.status}] {action.source} -> {action.destination}"
-            )
+            print(f"[{action.status}] {action.source} -> {action.destination}")
 
         if args.execute:
             report = execute_organization(args.source, actions)
@@ -249,7 +262,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-
-

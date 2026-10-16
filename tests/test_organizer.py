@@ -135,9 +135,7 @@ def test_copy_failure_preserves_original_and_cleans_partial_destination(
     assert not list((tmp_path / "Images").glob(".organizer-*"))
 
 
-def test_source_unlink_failure_keeps_source_and_reports_error(
-    tmp_path, monkeypatch
-):
+def test_source_unlink_failure_keeps_source_and_reports_error(tmp_path, monkeypatch):
 
     photo = tmp_path / "photo.jpg"
     photo.write_bytes(b"original")
@@ -167,9 +165,7 @@ def test_changed_source_is_skipped(tmp_path):
 
     report = execute_organization(tmp_path, actions)
 
-    assert report["skipped"] == [
-        {"source": str(photo), "reason": "source_changed"}
-    ]
+    assert report["skipped"] == [{"source": str(photo), "reason": "source_changed"}]
     assert report["moved"] == []
     assert report["errors"] == []
 
@@ -222,3 +218,99 @@ def test_cli_returns_error_for_missing_directory(tmp_path, capsys):
     assert result == 1
     assert "Error:" in captured.out
     assert "does not exist" in captured.out
+
+
+def test_cleanup_failure_is_reported(tmp_path, monkeypatch):
+    import src.organizer as organizer
+
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"original")
+    actions = plan_organization(tmp_path)
+    real_copyfileobj = organizer.shutil.copyfileobj
+    real_unlink = Path.unlink
+    calls = 0
+
+    def failing_copyfileobj(source, destination, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            destination.write(b"partial")
+            raise OSError("simulated copy failure")
+        return real_copyfileobj(source, destination, *args, **kwargs)
+
+    def failing_destination_unlink(path, *args, **kwargs):
+        if path == tmp_path / "Images" / "photo.jpg":
+            raise OSError("simulated cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(organizer.shutil, "copyfileobj", failing_copyfileobj)
+    monkeypatch.setattr(Path, "unlink", failing_destination_unlink)
+
+    report = execute_organization(tmp_path, actions)
+
+    assert photo.read_bytes() == b"original"
+    assert (tmp_path / "Images" / "photo.jpg").read_bytes() == b"partial"
+    assert len(report["errors"]) == 1
+    assert "simulated cleanup failure" in report["errors"][0]["error"]
+
+
+def test_temporary_file_cleanup_failure_is_reported(tmp_path, monkeypatch):
+    import src.organizer as organizer
+
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"original")
+    actions = plan_organization(tmp_path)
+    real_unlink = Path.unlink
+    temporary_paths = []
+
+    real_named_temporary_file = organizer.tempfile.NamedTemporaryFile
+
+    def tracking_temp_file(*args, **kwargs):
+        temp_file = real_named_temporary_file(*args, **kwargs)
+        temporary_paths.append(Path(temp_file.name))
+        return temp_file
+
+    def failing_temp_unlink(path, *args, **kwargs):
+        if path.name.startswith(".organizer-"):
+            raise OSError("simulated temporary cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(organizer.tempfile, "NamedTemporaryFile", tracking_temp_file)
+    monkeypatch.setattr(Path, "unlink", failing_temp_unlink)
+
+    report = execute_organization(tmp_path, actions)
+
+    destination = tmp_path / "Images" / "photo.jpg"
+    assert not photo.exists()
+    assert destination.read_bytes() == b"original"
+    assert any(
+        "simulated temporary cleanup failure" in item["error"]
+        for item in report["errors"]
+    )
+    assert temporary_paths
+    assert temporary_paths[0].exists()
+    real_unlink(temporary_paths[0])
+
+
+def test_source_unlink_failure_reports_retained_source_state(tmp_path, monkeypatch):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"original")
+    actions = plan_organization(tmp_path)
+    real_unlink = Path.unlink
+
+    def failing_source_unlink(path, *args, **kwargs):
+        if path == photo:
+            raise OSError("simulated source unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_source_unlink)
+
+    report = execute_organization(tmp_path, actions)
+
+    destination = tmp_path / "Images" / "photo.jpg"
+    assert photo.read_bytes() == b"original"
+    assert destination.read_bytes() == b"original"
+    assert report["moved"] == []
+    assert len(report["errors"]) == 1
+    assert report["errors"][0]["state"] == "destination_created_source_retained"
+    assert report["errors"][0]["destination"] == str(destination)
