@@ -314,3 +314,65 @@ def test_source_unlink_failure_reports_retained_source_state(tmp_path, monkeypat
     assert len(report["errors"]) == 1
     assert report["errors"][0]["state"] == "destination_created_source_retained"
     assert report["errors"][0]["destination"] == str(destination)
+
+
+def test_modified_source_during_copy_is_not_deleted(tmp_path, monkeypatch):
+    import src.organizer as organizer
+
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"original")
+    actions = plan_organization(tmp_path)
+    real_copyfileobj = organizer.shutil.copyfileobj
+    calls = 0
+
+    def change_source_during_copy(source, destination, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = real_copyfileobj(source, destination, *args, **kwargs)
+        if calls == 1:
+            photo.write_bytes(b"changed while organizing")
+        return result
+
+    monkeypatch.setattr(organizer.shutil, "copyfileobj", change_source_during_copy)
+
+    report = execute_organization(tmp_path, actions)
+
+    assert photo.exists(), "Changed source must not be deleted"
+    assert photo.read_bytes() == b"changed while organizing"
+    assert report["moved"] == []
+
+
+def test_modified_source_after_destination_copy_is_not_deleted(tmp_path, monkeypatch):
+    import src.organizer as organizer
+
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"original")
+    actions = plan_organization(tmp_path)
+    real_copyfileobj = organizer.shutil.copyfileobj
+    calls = 0
+
+    def change_source_after_destination_copy(source, destination, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = real_copyfileobj(source, destination, *args, **kwargs)
+        if calls == 2:
+            photo.write_bytes(b"changed before deletion")
+        return result
+
+    monkeypatch.setattr(
+        organizer.shutil,
+        "copyfileobj",
+        change_source_after_destination_copy,
+    )
+
+    report = execute_organization(tmp_path, actions)
+    destination = tmp_path / "Images" / "photo.jpg"
+
+    assert photo.exists()
+    assert photo.read_bytes() == b"changed before deletion"
+    assert destination.read_bytes() == b"original"
+    assert report["moved"] == []
+    assert any(
+        error.get("state") == "source_changed_destination_retained"
+        for error in report["errors"]
+    )

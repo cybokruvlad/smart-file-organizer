@@ -123,6 +123,18 @@ def execute_organization(
                 temp_file.flush()
                 os.fsync(temp_file.fileno())
 
+            source_digest = sha256_file(original)
+            temporary_digest = sha256_file(temporary)
+
+            if source_digest != temporary_digest:
+                report["skipped"].append(
+                    {
+                        "source": str(original),
+                        "reason": "source_changed_during_copy",
+                    }
+                )
+                continue
+
             try:
                 with destination.open("xb") as dst:
                     destination_created = True
@@ -145,6 +157,17 @@ def execute_organization(
                             f"partial destination {destination}: {cleanup_error}"
                         ) from copy_error
                 raise
+
+            if sha256_file(original) != source_digest:
+                report["errors"].append(
+                    {
+                        "source": str(original),
+                        "destination": str(destination),
+                        "error": "Source content changed before deletion.",
+                        "state": "source_changed_destination_retained",
+                    }
+                )
+                continue
 
             try:
                 original.unlink()
